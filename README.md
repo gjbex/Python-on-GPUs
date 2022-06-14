@@ -4,6 +4,7 @@ GitHub repository for participants of the "Python on GPUs" training.
 For information on the training, see the website
 [https://gjbex.github.io/Python-on-GPUs/](https://gjbex.github.io/Python-on-GPUs/)
 
+**Note: this is work in progress**
 
 ## What is it?
 
