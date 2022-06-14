@@ -1,0 +1,13 @@
+name: python_on_gpus
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - pycuda
+  - jupyterlab
+  - matplotlib
+  - numpy
+  - nvcc_linux-64
+  - numba
+  - psutil
+prefix: /home/gjb/miniconda3/envs/python_on_gpus
