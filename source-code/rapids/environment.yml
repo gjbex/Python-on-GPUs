@@ -1,0 +1,15 @@
+name: rapids
+channels:
+  - rapidsai
+  - conda-forge
+  - nvidia
+dependencies:
+  - cudf=23.04
+  - python=3.10
+  - cudatoolkit=11.8
+  - jupyterlab
+  - pycuda
+  - ca-certificates
+  - certifi
+  - openssl
+prefix: /home/gjb/mambaforge/envs/rapids
