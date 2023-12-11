@@ -7,7 +7,6 @@ dependencies:
   - jupyterlab
   - matplotlib
   - numpy
-  - nvcc_linux-64
   - numba
   - psutil
 prefix: /home/gjb/miniconda3/envs/python_on_gpus
