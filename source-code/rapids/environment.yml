@@ -1,4 +1,4 @@
-name: rapids-23.10
+name: rapids
 channels:
   - conda-forge
 dependencies:

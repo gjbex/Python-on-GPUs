@@ -133,5 +133,5 @@ dmypy.json
 *~
 *.bak
 
-# direnv config file
+# direnv configuration file
 .envrc
