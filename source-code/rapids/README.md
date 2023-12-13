@@ -10,3 +10,5 @@ on GPUs.
    and scripts in this directory.
 1. `cudf.ipynb`: Jupyter notebook comparing the performance of pandas
    dataframes to that of Rapids dataframes on some common operations.
+1. `ext_cudf_pandas_integration.ipynb`: Jupyter notebook illustrating
+   the `cudf.pandas` extension.
