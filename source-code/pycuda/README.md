@@ -10,3 +10,5 @@ GPU.  It is a Python wrapper for the CUDA API.
 1. `pycuda.ipynb`: Jupyter notebook with an introduction to PyCUDA, it
    illustrates data movement and the various types of kernels that can be
    created.
+1. `curand.ipynb`: Jupyter notebook with an introduction to the CURAND library,
+   which is a library for random number generation on the GPU.
