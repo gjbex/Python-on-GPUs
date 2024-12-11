@@ -5,7 +5,7 @@ Sample code for performing computations on a GPU.
 
 ## What is it?
 
-1. `pycuda.ipynb`: Jupyter notebook illustrating pyCUDA.
+1. `pycuda`: directory illustrating pyCUDA.
 1. `curand.ipynb`: Jupyter notebook illustrating generating random
    numbers on a GPU.
 1. `scikit_cuda.ipynb`: Jupyter notebook illustrating linear algebra
