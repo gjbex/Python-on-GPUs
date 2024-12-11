@@ -10,8 +10,6 @@ Sample code for performing computations on a GPU.
    numbers on a GPU.
 1. `scikit_cuda.ipynb`: Jupyter notebook illustrating linear algebra
    on a GPU device.
-1. `numba.ipynb`: Jupyter notebook illustrating using numba for
-   GPU computing.
-
+1. `numba`: code illustrating using numba for GPU computing.
 1. `cupy.ipynb`: Jupyter notebook illustrating some aspects of
    the `cupy` package.
