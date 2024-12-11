@@ -12,4 +12,6 @@ interface to the CUDA API.
 
 ## What is it?
 
+1. `environment.yml`: conda environment file specifying all dependencies
+   required to run the code.
 1. `scikit_cuda.ipynb`: Jupyter notebook with examples of using scikit-cuda.
