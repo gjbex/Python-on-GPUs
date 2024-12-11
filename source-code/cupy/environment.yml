@@ -1,0 +1,9 @@
+name: python_on_gpus_cupy
+channels:
+  - conda-forge
+dependencies:
+  - cupy
+  - numpy
+  - scipy
+  - jupyterlab
+prefix: /home/gjb/mambaforge/envs/python_on_gpus_cupy
