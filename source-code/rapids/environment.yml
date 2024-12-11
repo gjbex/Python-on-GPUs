@@ -1,0 +1,9 @@
+name: python_on_gpus_rapids
+channels:
+  - conda-forge
+dependencies:
+  - rapids
+  - numpy
+  - pandas
+  - jupyterlab
+prefix: /home/gjb/mambaforge/envs/python_on_gpus_rapids

@@ -1,0 +1,9 @@
+name: python_on_gpus_scikit_cuda
+channels:
+  - conda-forge
+dependencies:
+  - numpy
+  - pycuda
+  - scipy
+  - jupyterlab
+prefix: /home/gjb/mambaforge/envs/python_on_gpus_scikit_cuda
