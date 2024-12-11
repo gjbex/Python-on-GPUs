@@ -1,9 +1,9 @@
-name: rapids
+name: python_on_gpus_rapids
 channels:
   - conda-forge
 dependencies:
-  - rapids=23.10
-  - python=3.10
-  - cuda-version=12.0
+  - rapids
+  - numpy
+  - pandas
   - jupyterlab
-prefix: /home/gjb/mambaforge/envs/rapids-23.10
+prefix: /home/gjb/mambaforge/envs/python_on_gpus_rapids
