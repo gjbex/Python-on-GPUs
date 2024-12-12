@@ -1,0 +1,10 @@
+name: python_on_gpus_cupynumeric
+channels:
+  - conda-forge
+dependencies:
+  - cupynumeric
+  - numpy
+  - scipy
+  - matplotlib
+  - jupyterlab
+prefix: /home/gjb/mambaforge/envs/python_on_gpus_cupynumeric
