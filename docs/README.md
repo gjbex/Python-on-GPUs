@@ -59,6 +59,13 @@ from scratch.  Some familiarity with numpy is required as well.
 If you plan to do Python GPU programming in a Linux or HPC environment (and you should), then familiarity with these environments is required as well.
 
 
+## Levels
+
+* Introductory: 20 %
+* Intermediate: 40 %
+* Advanced: 40 %
+
+
 ## Trainer(s)
 
   * Geert Jan Bex ([geertjan.bex@uhasselt.be](mailto:geertjan.bex@uhasselt.be))
