@@ -2,13 +2,15 @@ name: python_on_gpus_numba
 channels:
   - conda-forge
 dependencies:
-  - matplotlib
-  - numba
-  - numpy
-  - jupyterlab
-  - cuda-nvcc
-  - cuda-nvrtc
   - ca-certificates
   - certifi
+  - cuda-nvcc
+  - cuda-nvrtc
+  - jupyterlab
+  - matplotlib
+  - numba
+  - numba-cuda
+  - numpy
   - openssl
-prefix: /home/gjb/mambaforge/envs/python_on_gpus_numba
+
+prefix: "/home/gjb/mambaforge/envs/python_on_gpus_numba"
