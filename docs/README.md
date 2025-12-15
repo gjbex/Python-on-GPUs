@@ -29,13 +29,13 @@ Total duration: 4 hours.
   | Subject                                     | Duration |
   |---------------------------------------------|----------|
   | introduction and motivation                 |  5 min.  |
-  | GPGPU architecture and features             | 45 min.  |
+  | GPGPU architecture and features             | 30 min.  |
   | moving data between host and device         | 15 min.  |
-  | linear algebra on GPGPUs                    | 25 min.  |
+  | linear algebra on GPGPUs                    | 20 min.  |
+  | Numba and concepts of GPU programming       | 90 min.  |
   | coffee break                                | 10 min.  |
   | writing your own kernels                    | 60 min.  |
   | data science with Rapids                    | 30 min.  |
-  | machine learning on GPUs                    | 20 min.  |
   | wrap up                                     | 10 min.  |
 
 
@@ -57,6 +57,15 @@ You will need experience programming in Python.  This is not a training that sta
 from scratch.  Some familiarity with numpy is required as well.
 
 If you plan to do Python GPU programming in a Linux or HPC environment (and you should), then familiarity with these environments is required as well.
+
+For following along hands-on, you need
+* laptop or desktop with internet access.
+* a system set up so you can connect to an HPC system, an account on an HPC
+  system (e.g., VSC, CECI, ...), compute credits if that is required to run
+  jobs on the HPC system if you want to use an HPC system;
+* a Python environment that can run Jupyter Lab if you want to use your own system
+  (this will only work if your system has an NVIDIA GPU and the required software installed);
+* access to Google Colaboratory if you prefer not to install software.
 
 
 ## Levels
