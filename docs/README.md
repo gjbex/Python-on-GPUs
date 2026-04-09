@@ -58,6 +58,49 @@ from scratch.  Some familiarity with numpy is required as well.
 
 If you plan to do Python GPU programming in a Linux or HPC environment (and you should), then familiarity with these environments is required as well.
 
+More concretely, participants should already be comfortable with the following:
+
+* running Python code in Jupyter or from the command line;
+* variables, numbers, strings, booleans, and basic containers such as lists
+  and dictionaries;
+* `if`/`else` statements, `for` loops, and writing simple functions;
+* importing modules and reading short Python scripts without needing every line
+  explained;
+* basic NumPy array operations such as creating arrays, reshaping them,
+  slicing them, and applying vectorized computations;
+* basic linear algebra with NumPy, for example matrix multiplication and
+  reductions such as sums or means;
+* reading and making small changes to short numerical Python scripts or
+  notebooks;
+* basic familiarity with Linux or HPC workflows if you want to run the code on
+  remote GPU systems.
+
+You do not need prior experience with PyCUDA, CuPy, cuPyNumeric, Numba GPU
+programming, cuRAND, RAPIDS, or custom CUDA kernels. Those are part of the
+training itself.
+
+### Quick self-assessment
+
+If you can do most of the tasks below without looking up basic Python syntax,
+you are likely ready for this training.
+
+* create a NumPy array, compute a slice from it, and calculate its sum or mean;
+* multiply two matrices with NumPy and interpret the shape of the result;
+* read a short script that imports `numpy`, builds arrays, and times a
+  computation;
+* write a function that applies a simple numerical formula to all elements of
+  an array;
+* explain the difference between a Python loop over elements and a vectorized
+  array operation at a high level;
+* make a small change to an example notebook or script and run it again;
+* read a short traceback or runtime error and identify roughly where the
+  problem occurred;
+* run a Python script from the command line with one or two arguments.
+
+If several of these items still feel difficult, the training will probably move
+too fast. In that case, it is better to first refresh basic Python and NumPy
+programming before taking this training.
+
 For following along hands-on, you need
 * laptop or desktop with internet access.
 * a system set up so you can connect to an HPC system, an account on an HPC
@@ -68,11 +111,17 @@ For following along hands-on, you need
 * access to Google Colaboratory if you prefer not to install software.
 
 
-## Levels
+## Level of the Material
 
-* Introductory: 20 %
-* Intermediate: 40 %
-* Advanced: 40 %
+For participants who already have basic Python and NumPy experience, the material in this training is approximately
+
+* Introductory: 10 %
+* Intermediate: 35 %
+* Advanced: 55 %
+
+These percentages describe the level of the GPU programming and accelerated
+computing topics covered in the training, not the required entry level in
+Python itself.
 
 
 ## Trainer(s)
