@@ -14,3 +14,5 @@ GPU.  It is a Python wrapper for the CUDA API.
    created.
 1. `curand.ipynb`: Jupyter notebook with an introduction to the CURAND library,
    which is a library for random number generation on the GPU.
+1. `gpu_info.py`: Python script that prints out information about the GPU(s)
+   available on the system.
