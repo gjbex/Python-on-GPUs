@@ -1,6 +1,7 @@
 schema_version = 2
 id = "python-on-gpus"
 title = "Python on GPUs"
+content_language = "en"
 summary = """
 The Python programming language is increasingly popular. It is a versatile language for general purpose programming and accessible for novice programmers. However, it is also increasingly used for scientific computing and can be used to develop code that runs on GPGPUs. Additionally, a number of libraries that are commonly used in scientific computing, data science and machine learning can use GPGPUs to improve performance.
 """
@@ -101,6 +102,10 @@ kind = "source-code"
 path = "source-code"
 
 [[trainers]]
+name = "Geert Jan Bex"
+email = "geertjan.bex@uhasselt.be"
+
+[[maintainers]]
 name = "Geert Jan Bex"
 email = "geertjan.bex@uhasselt.be"
 
