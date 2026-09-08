@@ -1,0 +1,9 @@
+name: python_on_gpus_jax
+channels:
+  - conda-forge
+dependencies:
+  - jax
+  - jaxlib=*=*cuda*
+  - jupyterlab
+  - matplotlib
+  - numpy
