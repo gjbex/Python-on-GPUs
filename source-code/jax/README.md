@@ -22,6 +22,8 @@ equations and particle dynamics; no machine-learning background is required.
    the multi-device wave solver for local runs and scheduler batch jobs.
 1. `environment.yml`: Conda environment for an NVIDIA GPU using the
    community-supported Conda packages for JAX.
+1. `python_on_gpus_jax_spec.txt`: Conda environment specification for an NVIDIA
+   GPU using the community-supported Conda packages for JAX.
 
 ## Environment setup
 
