@@ -18,6 +18,8 @@ equations and particle dynamics; no machine-learning background is required.
 1. `multi_device_wave_equation.ipynb`: multi-device tutorial using a 2-D wave
    equation, spatial slabs, explicit halo exchange, a global reduction, and
    strong-scaling methodology.
+1. `multi_device_n_body.ipynb`: focused multi-device N-body tutorial using
+   equal particle ownership and explicit `all_gather` communication.
 1. `multi_device_wave_equation.py`: non-interactive command-line version of
    the multi-device wave solver for local runs and scheduler batch jobs.
 1. `environment.yml`: Conda environment for an NVIDIA GPU using the
@@ -43,7 +45,7 @@ mamba create --name python_on_gpus_jax_cpu --channel conda-forge \
     jax jupyterlab matplotlib numpy
 ```
 
-The multi-device wave-equation notebook needs at least two visible devices.
+The multi-device notebooks need at least two visible devices.
 For correctness testing on a CPU-only machine, create four virtual CPU devices
 before starting Jupyter:
 
