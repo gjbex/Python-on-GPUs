@@ -20,6 +20,12 @@ equations and particle dynamics; no machine-learning background is required.
    strong-scaling methodology.
 1. `multi_device_n_body.ipynb`: focused multi-device N-body tutorial using
    equal particle ownership and explicit `all_gather` communication.
+1. `multi_device_lattice_boltzmann.ipynb`: D2Q9 Lattice Boltzmann tutorial
+   using a decaying periodic shear wave, local collision, packed neighbour
+   exchanges, independent streaming tests, and optional GPU strong scaling.
+1. `multi_device_lattice_boltzmann.py`: batch version of the Lattice Boltzmann
+   example, including multi-node execution, shard-local initialization,
+   slowest-process timing, and sharded final-state output.
 1. `multi_device_wave_equation.py`: non-interactive command-line version of
    the multi-device wave solver for local runs and scheduler batch jobs.
 1. `environment.yml`: Conda environment for an NVIDIA GPU using the
@@ -57,6 +63,13 @@ This mode validates sharding and collective operations, but its timings say
 nothing about multi-GPU performance.  The notebook keeps its real-GPU scaling
 experiment disabled unless `RUN_JAX_MULTI_GPU_BENCHMARK=1` is set before
 Jupyter starts.
+
+The Lattice Boltzmann notebook uses float32 by default; set `JAX_ENABLE_X64=1`
+for a double-precision validation run. Its optional benchmark uses a fixed
+1024-by-1024 grid, configurable through `LBM_BENCH_NX` and `LBM_BENCH_NY`.
+Keep the grid and precision fixed when comparing device counts. The worked
+example targets one process on one node and includes a separate optional
+hands-on block with complete solutions.
 
 ## Batch script
 
@@ -127,6 +140,104 @@ JAX accelerator support changes more rapidly than its array API.  Consult the
 [official installation guide](https://docs.jax.dev/en/latest/installation.html)
 if the solver cannot find the expected GPU, or when targeting AMD, Intel, Apple,
 or TPU hardware.
+
+## Lattice Boltzmann batch script
+
+Run the small reference-validated case on four emulated CPU devices:
+
+```bash
+python multi_device_lattice_boltzmann.py --emulate-cpu-devices 4
+```
+
+The script simulates the notebook's periodic shear wave using lattice units,
+with float32 by default. `--precision float64` enables double precision.
+`--nx` must divide evenly over the global device count; one-row slabs are
+supported. `--tau` must exceed 0.5, and `--amplitude` is restricted to a Mach
+number of at most 0.1. These input conditions do not establish stability for
+arbitrary grids or relaxation times.
+
+`--validation full` runs independent routing tests, conservation checks, and
+an unsharded reference on each process. It is restricted to at most 65536 sites
+to avoid accidentally replicating a large reference problem. `standard`
+retains routing and conservation checks without a global reference. Continuum
+decay checks apply for `nx >= 64` and `0.7 <= tau <= 1.0`; the summary records
+whether those checks were applied. `none` still rejects non-finite populations
+and non-positive density. Long float32 runs may need a precision review if
+accumulated conservation error exceeds the fixed validation tolerances.
+
+For two nodes with four GPUs each, launch one process per GPU:
+
+```bash
+#!/bin/bash
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-task=1
+#SBATCH --cpus-per-task=4
+#SBATCH --time=00:10:00
+
+# Activate the same JAX environment on every node before this command.
+srun --distribution=block:block python multi_device_lattice_boltzmann.py \
+    --backend gpu --distributed auto \
+    --nx 4096 --ny 4096 --steps 1000 \
+    --precision float32 --validation standard \
+    --output "lbm-${SLURM_JOB_ID}.json" \
+    --checkpoint-dir "lbm-${SLURM_JOB_ID}-state"
+```
+
+Adapt GPU requests and binding to the site's Slurm configuration. Verify that
+each process sees its allocated GPU. The mesh groups devices by process ID;
+block placement groups adjacent slab owners on the same node. Under Slurm,
+JAX discovers the distributed configuration automatically. With other launch
+environments, use `--distributed manual` and supply `--coordinator-address`,
+`--num-processes`, `--process-id`, and `--local-device-ids`. The coordinator
+must be reachable from all nodes; `127.0.0.1` is appropriate only for tests on
+one host. MPI is not required by the script's numerical implementation.
+
+All processes must execute the same run settings and collective sequence.
+The script checks agreement on run settings before creating numerical
+collectives. Output paths must refer to the same shared filesystem on all
+processes. Proxy environment variables can interfere with JAX distributed
+startup; consult the
+[initialization documentation](https://docs.jax.dev/en/latest/_autosummary/jax.distributed.initialize.html)
+if discovery times out.
+
+Each process initializes only its addressable slabs using their global
+coordinates. During stepping, `lax.ppermute` exchanges the three outgoing
+populations on each face; the host does not stage population messages.
+Compilation, warmup, diagnostics, and output are excluded from solve timing.
+`--repetitions` repeats the same initial-value problem and reports the median
+of the slowest-process times. CPU timings validate the execution path and do
+not measure multi-GPU scaling.
+
+Process zero writes a JSON summary to stdout or `--output`; application logs
+go to stderr. Some backends also print native startup diagnostics to stdout,
+so use `--output` when a file must contain strictly JSON.
+Existing summaries require `--overwrite`. The checkpoint directory must be
+new, even with `--overwrite`, and its parent must exist. Every GPU's final
+population slab is stored as `slab-XXXXXX.npy`; `manifest.json` records the
+global shape, direction ordering, x ranges, completed steps, and run settings.
+A manifest is written only after all shard writes succeed. A directory without
+a manifest is incomplete. The script writes a final snapshot rather than
+periodic recovery checkpoints.
+
+For a small snapshot, a separate analysis process can reconstruct the global
+state from the manifest's ordered list of slabs:
+
+```python
+import json
+from pathlib import Path
+import numpy as np
+
+directory = Path("lbm-state")
+manifest = json.loads((directory / "manifest.json").read_text())
+f = np.concatenate([
+    np.load(directory / shard["file"], allow_pickle=False)
+    for shard in manifest["shards"]
+], axis=0)
+```
+
+This reconstruction needs enough host memory for the entire state. For large
+cases, read and analyze individual slabs or downsample before assembly.
 
 ## Validation
 
