@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Batch-oriented multi-device JAX solver for the 2-D wave equation.
+r"""Batch-oriented multi-device JAX solver for the 2-D wave equation.
+
+The initial displacement is sin(kx*x)*sin(ky*y), with zero initial velocity,
+where kx=2*pi*mode_x/length_x and ky=2*pi*mode_y/length_y.  A second-order
+finite-difference solve advances this periodic standing wave to --final-time.
+Diagnostics compare its final field with the continuum solution, check
+discrete energy conservation, and optionally compare an unsharded solve.
 
 The global periodic field is partitioned into x-slabs.  A ``shard_map``
 kernel exchanges halo rows with ``lax.ppermute`` before applying a five-point
@@ -9,28 +15,85 @@ multi-process execution initialized by JAX (including Slurm auto-detection).
 Human-readable diagnostics go to stderr.  Process 0 writes one JSON summary
 to stdout or to ``--output``.  An optional final field can be written as a
 NumPy ``.npy`` file for single-process runs.
+
+Scaling experiments (run from this directory):
+
+    # Validate a small case before timing large grids.
+    python multi_device_wave_equation.py --backend gpu --num-gpus 2
+
+    # Strong scaling: keep the global grid, step count, and precision fixed.
+    for gpus in 1 2 4; do
+        python multi_device_wave_equation.py --backend gpu --num-gpus "$gpus" \
+            --nx 2048 --ny 2048 --steps 1000 --precision float32 \
+            --warmup-runs 2 --repetitions 5 --validation none \
+            --output "wave-strong-${gpus}.json"
+    done
+
+    # Weak scaling: keep the rows and columns per GPU and the step count fixed.
+    for gpus in 1 2 4; do
+        python multi_device_wave_equation.py --backend gpu --num-gpus "$gpus" \
+            --nx-per-device 512 --ny 1024 --steps 1000 --precision float32 \
+            --warmup-runs 2 --repetitions 5 --validation none \
+            --output "wave-weak-${gpus}.json"
+    done
+
+``--num-gpus`` is an alias for the backend-independent ``--num-devices``.
+Both choose a subset of the JAX-visible devices for the mesh; they do not change
+the scheduler allocation or CUDA_VISIBLE_DEVICES. By default all visible devices
+are used. ``--device-ids 0,2`` instead selects explicit indices in jax.devices(),
+in the supplied order, on one process. In multi-process runs the global count
+must divide equally across all launched processes, each using its first local
+devices. With one process per GPU, change the launcher's process count to change
+the GPU count. All ranks must pass the same simulation and timing options.
+
+``--steps`` and ``--final-time`` are mutually exclusive. With ``--steps``, the
+time step is CFL-based unless ``--dt`` is supplied; the physical final time is
+steps*dt. With ``--final-time`` (default 0.5), the CFL-based step is shortened to
+reach that time exactly. An explicit dt must satisfy the stencil's stability
+condition. ``--nx-per-device`` and ``--nx`` are mutually exclusive. Weak scaling
+at fixed domain lengths refines the x grid and can change dt and final time;
+scale --length-x with the device count to keep the x spacing fixed as well.
+
+Every timed repetition starts from the same initial state, includes all steps
+(including the Taylor starting step), and waits for both output time levels.
+Compilation, warmups, diagnostics, output, and timing barriers/reductions are
+excluded from execution_seconds. Multi-process runs synchronize before each
+repetition and report its maximum duration over ranks. JSON includes individual
+durations, minimum/median/maximum and population standard deviation, update
+throughput, actual mesh devices, global/local grid sizes, dt, and final time.
+For strong scaling, speedup is the one-device median divided by the P-device
+median; efficiency is speedup/P, where P is the selected device count. For weak
+scaling, efficiency is the one-device median divided by the P-device median.
+
+Initialization constructs only local slabs. ``--validation full`` still builds
+the full small-grid reference on every process; use standard or none for large
+benchmarks. Virtual CPU devices can test selection and halo exchange, but their
+timings do not measure GPU scaling. See --help and README.md for model details.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
 import platform
 import sys
 import time
+from collections.abc import Sequence
 from functools import partial
 from pathlib import Path
-from statistics import median
-from typing import Any, Sequence
+from statistics import median, pstdev
+from typing import Any
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 from jax import lax
-from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
-
+from jax.experimental import multihost_utils
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 
 AXIS_NAME = "devices"
 LOGGER = logging.getLogger("multi_device_wave_equation")
@@ -80,22 +143,67 @@ def build_parser() -> argparse.ArgumentParser:
             "explicit JAX halo exchange."
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog=(
+            "Strong scaling: keep --nx, --ny, --steps and --precision fixed, "
+            "vary --num-gpus. Weak scaling: use --nx-per-device instead of "
+            "--nx, keeping --ny and --steps fixed. Use several --repetitions. "
+            "See the module docstring for complete examples."
+        ),
     )
 
     problem = parser.add_argument_group("scientific problem")
-    problem.add_argument("--nx", type=positive_int, default=128)
-    problem.add_argument("--ny", type=positive_int, default=128)
-    problem.add_argument(
-        "--length-x", type=positive_float, default=2.0 * np.pi
+    x_size = problem.add_mutually_exclusive_group()
+    x_size.add_argument(
+        "--nx", type=positive_int, default=128, help="global grid rows along x"
+    )
+    x_size.add_argument(
+        "--nx-per-device",
+        type=positive_int,
+        help="set global nx to this many rows times the selected device count",
     )
     problem.add_argument(
-        "--length-y", type=positive_float, default=2.0 * np.pi
+        "--ny", type=positive_int, default=128, help="global grid columns along y"
     )
-    problem.add_argument("--wave-speed", type=positive_float, default=1.0)
-    problem.add_argument("--mode-x", type=nonnegative_int, default=1)
-    problem.add_argument("--mode-y", type=nonnegative_int, default=2)
     problem.add_argument(
-        "--final-time", type=positive_float, default=0.5
+        "--length-x",
+        type=positive_float,
+        default=2.0 * np.pi,
+        help="periodic domain length along x",
+    )
+    problem.add_argument(
+        "--length-y",
+        type=positive_float,
+        default=2.0 * np.pi,
+        help="periodic domain length along y",
+    )
+    problem.add_argument(
+        "--wave-speed",
+        type=positive_float,
+        default=1.0,
+        help="wave speed in consistent length/time units",
+    )
+    problem.add_argument(
+        "--mode-x", type=positive_int, default=1, help="positive period count along x"
+    )
+    problem.add_argument(
+        "--mode-y", type=positive_int, default=2, help="positive period count along y"
+    )
+    duration = problem.add_mutually_exclusive_group()
+    duration.add_argument(
+        "--final-time",
+        type=positive_float,
+        default=0.5,
+        help="physical final time; replaced by steps*dt when --steps is used",
+    )
+    duration.add_argument(
+        "--steps",
+        type=positive_int,
+        help="fixed number of time steps, including the Taylor starting step",
+    )
+    problem.add_argument(
+        "--dt",
+        type=positive_float,
+        help="time step with --steps; otherwise use the CFL-based step",
     )
     problem.add_argument(
         "--cfl",
@@ -122,6 +230,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=positive_int,
         metavar="COUNT",
         help="create COUNT virtual CPU devices for correctness testing",
+    )
+    selection = execution.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--num-devices",
+        "--num-gpus",
+        dest="num_devices",
+        type=positive_int,
+        metavar="COUNT",
+        help="global number of devices to use; default is all visible devices",
+    )
+    selection.add_argument(
+        "--device-ids",
+        type=parse_local_device_ids,
+        help="ordered indices in jax.devices() to use; single-process only",
     )
     execution.add_argument(
         "--validation",
@@ -151,8 +273,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("off", "auto", "manual"),
         default="off",
         help=(
-            "auto uses scheduler detection; manual uses the coordinator "
-            "arguments below"
+            "auto uses scheduler detection; manual uses the coordinator arguments below"
         ),
     )
     distributed.add_argument("--coordinator-address")
@@ -197,10 +318,14 @@ def build_parser() -> argparse.ArgumentParser:
 def validate_arguments(
     args: argparse.Namespace, parser: argparse.ArgumentParser
 ) -> None:
-    if args.nx < 3 or args.ny < 3:
+    if (args.nx_per_device is None and args.nx < 3) or args.ny < 3:
         parser.error("--nx and --ny must both be at least 3")
-    if args.mode_x == 0 and args.mode_y == 0:
-        parser.error("--mode-x and --mode-y cannot both be zero")
+    if args.nx_per_device is not None and args.nx_per_device < 2:
+        parser.error("--nx-per-device must be at least 2")
+    if args.dt is not None and args.steps is None:
+        parser.error("--dt requires --steps")
+    if args.device_ids is not None and args.distributed != "off":
+        parser.error("--device-ids supports single-process execution only")
     if args.cfl > 1.0 / np.sqrt(2.0):
         parser.error("--cfl must not exceed 1/sqrt(2) for this scheme")
 
@@ -209,20 +334,16 @@ def validate_arguments(
         args.num_processes,
         args.process_id,
     )
-    if args.distributed == "manual" and any(
-        value is None for value in manual_values
-    ):
+    if args.distributed == "manual" and any(value is None for value in manual_values):
         parser.error(
             "manual distributed mode requires --coordinator-address, "
             "--num-processes, and --process-id"
         )
     if args.distributed != "manual" and any(
-        value is not None
-        for value in (*manual_values, args.local_device_ids)
+        value is not None for value in (*manual_values, args.local_device_ids)
     ):
         parser.error(
-            "manual distributed options are accepted only with "
-            "--distributed manual"
+            "manual distributed options are accepted only with --distributed manual"
         )
     if (
         args.process_id is not None
@@ -231,9 +352,7 @@ def validate_arguments(
     ):
         parser.error("--process-id must be smaller than --num-processes")
     if args.emulate_cpu_devices and args.distributed != "off":
-        parser.error(
-            "--emulate-cpu-devices supports single-process execution only"
-        )
+        parser.error("--emulate-cpu-devices supports single-process execution only")
     if args.emulate_cpu_devices and args.backend not in ("auto", "cpu"):
         parser.error("CPU emulation is incompatible with the requested backend")
 
@@ -276,9 +395,7 @@ def configure_jax(args: argparse.Namespace) -> bool:
     if args.distributed == "off":
         return False
     if args.distributed == "auto":
-        jax.distributed.initialize(
-            initialization_timeout=args.initialization_timeout
-        )
+        jax.distributed.initialize(initialization_timeout=args.initialization_timeout)
     else:
         jax.distributed.initialize(
             coordinator_address=args.coordinator_address,
@@ -290,13 +407,79 @@ def configure_jax(args: argparse.Namespace) -> bool:
     return True
 
 
+def gather_process_values(value: np.ndarray) -> np.ndarray:
+    """Gather small host-side values; never gather simulation fields here."""
+    if jax.process_count() == 1:
+        return np.asarray(value)[None, ...]
+    return np.asarray(multihost_utils.process_allgather(value, tiled=False))
+
+
+def synchronize(label: str) -> None:
+    if jax.process_count() > 1:
+        multihost_utils.sync_global_devices(label)
+
+
+def slowest_process_seconds(local_seconds: float) -> float:
+    return float(np.max(gather_process_values(np.asarray(local_seconds))))
+
+
+def validate_process_configuration(args: argparse.Namespace) -> None:
+    """Catch rank mismatches before entering differently shaped collectives."""
+    if jax.process_count() == 1:
+        return
+    settings = {
+        key: value
+        for key, value in vars(args).items()
+        if key
+        not in {"process_id", "local_device_ids", "coordinator_address", "log_level"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(settings, sort_keys=True, default=str).encode()
+    ).digest()
+    digests = gather_process_values(np.frombuffer(digest, dtype=np.uint8))
+    if np.any(digests != digests[0]):
+        raise ValueError("processes have different run parameters or output paths")
+
+
+def select_devices(args: argparse.Namespace) -> tuple[list[Any], list[Any]]:
+    """Select a mesh subset without changing scheduler GPU visibility."""
+    available = list(jax.devices())
+    if args.device_ids is not None:
+        if max(args.device_ids) >= len(available):
+            raise ValueError(f"--device-ids indices must be below {len(available)}")
+        return available, [available[index] for index in args.device_ids]
+    count = args.num_devices or len(available)
+    if count > len(available):
+        raise ValueError(
+            f"requested {count} devices, but only {len(available)} are visible"
+        )
+    if jax.process_count() == 1:
+        return available, available[:count]
+    # Every launched process participates. Do not silently drop some ranks.
+    process_count = jax.process_count()
+    if count % process_count or count < process_count:
+        raise ValueError(
+            "--num-devices must be a positive multiple of the process count; "
+            "launch fewer processes to use fewer devices than processes"
+        )
+    per_process = count // process_count
+    selected = []
+    for process in range(process_count):
+        local = sorted(
+            (device for device in available if device.process_index == process),
+            key=lambda device: device.id,
+        )
+        if len(local) < per_process:
+            raise ValueError(
+                f"process {process} has {len(local)} devices, needs {per_process}"
+            )
+        selected.extend(local[:per_process])
+    return available, selected
+
+
 def reference_laplacian(u: jax.Array, dx: float, dy: float) -> jax.Array:
-    d2x = (
-        jnp.roll(u, 1, axis=0) - 2.0 * u + jnp.roll(u, -1, axis=0)
-    ) / dx**2
-    d2y = (
-        jnp.roll(u, 1, axis=1) - 2.0 * u + jnp.roll(u, -1, axis=1)
-    ) / dy**2
+    d2x = (jnp.roll(u, 1, axis=0) - 2.0 * u + jnp.roll(u, -1, axis=0)) / dx**2
+    d2y = (jnp.roll(u, 1, axis=1) - 2.0 * u + jnp.roll(u, -1, axis=1)) / dy**2
     return d2x + d2y
 
 
@@ -334,9 +517,7 @@ def make_distributed_operators(
     send_right = tuple(
         (source, (source + 1) % n_devices) for source in range(n_devices)
     )
-    send_left = tuple(
-        (source, (source - 1) % n_devices) for source in range(n_devices)
-    )
+    send_left = tuple((source, (source - 1) % n_devices) for source in range(n_devices))
     field_spec = P(AXIS_NAME, None)
 
     @partial(
@@ -352,13 +533,9 @@ def make_distributed_operators(
         padded = jnp.concatenate(
             (left_halo[None, :], u_local, right_halo[None, :]), axis=0
         )
-        d2x = (
-            padded[:-2] - 2.0 * padded[1:-1] + padded[2:]
-        ) / dx**2
+        d2x = (padded[:-2] - 2.0 * padded[1:-1] + padded[2:]) / dx**2
         d2y = (
-            jnp.roll(u_local, 1, axis=1)
-            - 2.0 * u_local
-            + jnp.roll(u_local, -1, axis=1)
+            jnp.roll(u_local, 1, axis=1) - 2.0 * u_local + jnp.roll(u_local, -1, axis=1)
         ) / dy**2
         return d2x + d2y
 
@@ -372,9 +549,7 @@ def make_distributed_operators(
     def distributed_energy(
         u_previous_local: jax.Array, u_current_local: jax.Array
     ) -> jax.Array:
-        next_previous = lax.ppermute(
-            u_previous_local[0], AXIS_NAME, send_left
-        )
+        next_previous = lax.ppermute(u_previous_local[0], AXIS_NAME, send_left)
         next_current = lax.ppermute(u_current_local[0], AXIS_NAME, send_left)
         forward_previous = jnp.concatenate(
             (u_previous_local[1:], next_previous[None, :]), axis=0
@@ -388,18 +563,13 @@ def make_distributed_operators(
         grad_y_previous = (
             jnp.roll(u_previous_local, -1, axis=1) - u_previous_local
         ) / dy
-        grad_y_current = (
-            jnp.roll(u_current_local, -1, axis=1) - u_current_local
-        ) / dy
+        grad_y_current = (jnp.roll(u_current_local, -1, axis=1) - u_current_local) / dy
         local_energy = (
             0.5
             * jnp.sum(
                 velocity**2
                 + wave_speed**2
-                * (
-                    grad_x_previous * grad_x_current
-                    + grad_y_previous * grad_y_current
-                )
+                * (grad_x_previous * grad_x_current + grad_y_previous * grad_y_current)
             )
             * dx
             * dy
@@ -422,9 +592,12 @@ def make_distributed_operators(
         return maximum, sum_of_squares
 
     @jax.jit
-    def solve(
-        u_initial: jax.Array, u_after_one_step: jax.Array, n_steps: int
-    ) -> tuple[jax.Array, jax.Array]:
+    def solve(u_initial: jax.Array, n_steps: int) -> tuple[jax.Array, jax.Array]:
+        # Include the first stencil evaluation in the timed workload.
+        u_after_one_step = u_initial + (
+            0.5 * (wave_speed * dt) ** 2 * distributed_laplacian(u_initial)
+        )
+
         def body(
             _: int, state: tuple[jax.Array, jax.Array]
         ) -> tuple[jax.Array, jax.Array]:
@@ -454,27 +627,37 @@ def build_initial_fields(
     xx, yy = np.meshgrid(x, y, indexing="ij")
     wave_number_x = 2.0 * np.pi * args.mode_x / args.length_x
     wave_number_y = 2.0 * np.pi * args.mode_y / args.length_y
-    u_initial = (
-        np.sin(wave_number_x * xx) * np.sin(wave_number_y * yy)
-    ).astype(dtype)
+    u_initial = (np.sin(wave_number_x * xx) * np.sin(wave_number_y * yy)).astype(dtype)
     laplacian_initial = (
-        (
-            np.roll(u_initial, 1, axis=0)
-            - 2.0 * u_initial
-            + np.roll(u_initial, -1, axis=0)
-        )
-        / dx**2
-        + (
-            np.roll(u_initial, 1, axis=1)
-            - 2.0 * u_initial
-            + np.roll(u_initial, -1, axis=1)
-        )
-        / dy**2
-    )
-    angular_frequency = args.wave_speed * np.sqrt(
-        wave_number_x**2 + wave_number_y**2
-    )
+        np.roll(u_initial, 1, axis=0) - 2.0 * u_initial + np.roll(u_initial, -1, axis=0)
+    ) / dx**2 + (
+        np.roll(u_initial, 1, axis=1) - 2.0 * u_initial + np.roll(u_initial, -1, axis=1)
+    ) / dy**2
+    angular_frequency = args.wave_speed * np.sqrt(wave_number_x**2 + wave_number_y**2)
     return u_initial, laplacian_initial, xx, angular_frequency
+
+
+def build_initial_block(
+    index: tuple[slice, ...],
+    args: argparse.Namespace,
+    *,
+    dx: float,
+    dy: float,
+    dtype: Any,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Generate one x slab and its reference Laplacian, with periodic halos."""
+    start, stop, _ = index[0].indices(args.nx)
+    x_index = np.arange(start - 1, stop + 1) % args.nx
+    x = x_index.astype(dtype) * dx
+    y = np.arange(args.ny, dtype=dtype) * dy
+    kx = 2.0 * np.pi * args.mode_x / args.length_x
+    ky = 2.0 * np.pi * args.mode_y / args.length_y
+    padded = (np.sin(kx * x[:, None]) * np.sin(ky * y[None, :])).astype(dtype)
+    initial = padded[1:-1]
+    laplacian = (padded[:-2] - 2.0 * initial + padded[2:]) / dx**2 + (
+        np.roll(initial, 1, axis=1) - 2.0 * initial + np.roll(initial, -1, axis=1)
+    ) / dy**2
+    return initial, laplacian
 
 
 def scalar(value: jax.Array) -> float:
@@ -493,10 +676,16 @@ def error_metrics(
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
-    global_devices = np.asarray(jax.devices())
-    local_devices = jax.local_devices()
+    validate_process_configuration(args)
+    available_devices, selected_devices = select_devices(args)
+    global_devices = np.asarray(selected_devices)
     process_index = jax.process_index()
     process_count = jax.process_count()
+    local_devices = [
+        device for device in selected_devices if device.process_index == process_index
+    ]
+    if args.nx_per_device is not None:
+        args.nx = args.nx_per_device * len(selected_devices)
 
     if args.field_output and process_count > 1:
         raise ValueError(
@@ -510,14 +699,24 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.nx // global_devices.size < 2:
         raise ValueError("each device must own at least two x rows")
+    if 2 * args.mode_x >= args.nx or 2 * args.mode_y >= args.ny:
+        raise ValueError("mode counts must be below half their respective grid sizes")
 
     backend = jax.default_backend()
     dtype = np.float64 if args.precision == "float64" else np.float32
     dx = args.length_x / args.nx
     dy = args.length_y / args.ny
     dt_limit = args.cfl * min(dx, dy) / args.wave_speed
-    n_steps = int(np.ceil(args.final_time / dt_limit))
-    dt = args.final_time / n_steps
+    if args.steps is None:
+        final_time = args.final_time
+        n_steps = int(np.ceil(final_time / dt_limit))
+        dt = final_time / n_steps
+    else:
+        n_steps = args.steps
+        dt = args.dt if args.dt is not None else dt_limit
+        final_time = n_steps * dt
+    if not np.isfinite(final_time) or not np.isfinite(dt) or dt <= 0:
+        raise ValueError("derived final time and time step must be finite and positive")
     stability_number = (args.wave_speed * dt / dx) ** 2 + (
         args.wave_speed * dt / dy
     ) ** 2
@@ -541,24 +740,26 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         dy=dy,
     )
 
-    u_initial_host, laplacian_initial_host, _, angular_frequency = (
-        build_initial_fields(args, dx=dx, dy=dy, dtype=dtype)
+    angular_frequency = args.wave_speed * np.sqrt(
+        (2.0 * np.pi * args.mode_x / args.length_x) ** 2
+        + (2.0 * np.pi * args.mode_y / args.length_y) ** 2
     )
-    u_after_one_step_host = u_initial_host + (
-        0.5 * (args.wave_speed * dt) ** 2 * laplacian_initial_host
+    shape = (args.nx, args.ny)
+    initial_block = partial(build_initial_block, args=args, dx=dx, dy=dy, dtype=dtype)
+    u_initial = jax.make_array_from_callback(
+        shape, field_sharding, lambda index: initial_block(index)[0]
     )
-    exact_final_host = (
-        np.cos(angular_frequency * args.final_time) * u_initial_host
+    # Only process-local slabs are constructed, including on multiple nodes.
+    exact_final = jax.make_array_from_callback(
+        shape,
+        field_sharding,
+        lambda index: np.cos(angular_frequency * final_time) * initial_block(index)[0],
     )
-
-    u_initial = jax.device_put(u_initial_host, field_sharding)
-    u_after_one_step = jax.device_put(
-        u_after_one_step_host, field_sharding
+    start_step = jax.jit(
+        lambda u: u + 0.5 * (args.wave_speed * dt) ** 2 * distributed_laplacian(u)
     )
-    exact_final = jax.device_put(exact_final_host, field_sharding)
-    laplacian_expected = jax.device_put(
-        laplacian_initial_host, field_sharding
-    )
+    u_after_one_step = start_step(u_initial)
+    jax.block_until_ready((u_initial, u_after_one_step, exact_final))
 
     LOGGER.info(
         "rank=%d/%d backend=%s global_devices=%d local_devices=%d grid=%dx%d steps=%d",
@@ -572,43 +773,46 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         n_steps,
     )
 
+    synchronize("wave-compile-start")
     compilation_started = time.perf_counter()
-    executable = solve.lower(
-        u_initial, u_after_one_step, n_steps
-    ).compile()
-    compilation_seconds = time.perf_counter() - compilation_started
+    executable = solve.lower(u_initial, n_steps).compile()
+    compilation_seconds = slowest_process_seconds(
+        time.perf_counter() - compilation_started
+    )
 
     for _ in range(args.warmup_runs):
-        executable(
-            u_initial, u_after_one_step, n_steps
-        )[1].block_until_ready()
+        jax.block_until_ready(executable(u_initial, n_steps))
 
     execution_seconds: list[float] = []
     u_previous = u_initial
     u_final = u_after_one_step
-    for _ in range(args.repetitions):
+    for repetition in range(args.repetitions):
+        synchronize(f"wave-run-start-{repetition}")
         started = time.perf_counter()
-        u_previous, u_final = executable(
-            u_initial, u_after_one_step, n_steps
-        )
-        u_final.block_until_ready()
-        execution_seconds.append(time.perf_counter() - started)
+        u_previous, u_final = executable(u_initial, n_steps)
+        jax.block_until_ready((u_previous, u_final))
+        execution_seconds.append(slowest_process_seconds(time.perf_counter() - started))
 
     energy_initial = scalar(distributed_energy(u_initial, u_after_one_step))
     energy_final = scalar(distributed_energy(u_previous, u_final))
-    relative_energy_drift = abs(energy_final - energy_initial) / abs(
-        energy_initial
-    )
+    if not np.isfinite(energy_initial) or energy_initial <= 0:
+        raise RuntimeError("initial discrete energy must be finite and positive")
+    relative_energy_drift = abs(energy_final - energy_initial) / abs(energy_initial)
     exact_max_error, exact_rms_error = error_metrics(
         distributed_error_sums,
         u_final,
         exact_final,
         point_count=args.nx * args.ny,
     )
+    if not np.isfinite([relative_energy_drift, exact_max_error, exact_rms_error]).all():
+        raise RuntimeError("simulation produced non-finite diagnostics")
 
     laplacian_max_error: float | None = None
     reference_max_error: float | None = None
     if args.validation != "none":
+        laplacian_expected = jax.make_array_from_callback(
+            shape, field_sharding, lambda index: initial_block(index)[1]
+        )
         laplacian_actual = distributed_laplacian(u_initial)
         laplacian_max_error, _ = error_metrics(
             distributed_error_sums,
@@ -618,6 +822,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     if args.validation == "full":
+        u_initial_host, laplacian_initial_host, _, _ = build_initial_fields(
+            args, dx=dx, dy=dy, dtype=dtype
+        )
+        u_after_one_step_host = u_initial_host + (
+            0.5 * (args.wave_speed * dt) ** 2 * laplacian_initial_host
+        )
         reference_solve = jax.jit(
             partial(
                 reference_solver,
@@ -633,9 +843,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             n_steps,
         )
         reference_final_host = np.asarray(reference_final)
-        reference_final_sharded = jax.device_put(
-            reference_final_host, field_sharding
-        )
+        reference_final_sharded = jax.device_put(reference_final_host, field_sharding)
         reference_max_error, _ = error_metrics(
             distributed_error_sums,
             u_final,
@@ -692,7 +900,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "wave_speed": args.wave_speed,
             "mode_x": args.mode_x,
             "mode_y": args.mode_y,
-            "final_time": args.final_time,
+            "final_time": final_time,
+            "requested_final_time": args.final_time if args.steps is None else None,
+            "requested_steps": args.steps,
+            "requested_dt": args.dt,
+            "nx_per_device": args.nx_per_device,
+            "requested_device_count": args.num_devices,
+            "requested_device_ids": args.device_ids,
             "cfl": args.cfl,
             "precision": args.precision,
             "validation": args.validation,
@@ -713,6 +927,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "process_count": process_count,
             "global_device_count": int(global_devices.size),
             "local_device_count": len(local_devices),
+            "available_global_device_count": len(available_devices),
+            "mesh_devices": [
+                {
+                    "id": device.id,
+                    "process_index": device.process_index,
+                    "description": str(device),
+                }
+                for device in selected_devices
+            ],
             "scheduler_environment": scheduler_environment,
         },
         "derived": {
@@ -722,11 +945,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "n_steps": n_steps,
             "stability_number": stability_number,
             "local_nx": args.nx // global_devices.size,
+            "grid_point_updates": args.nx * args.ny * n_steps,
         },
         "timing": {
             "compilation_seconds": compilation_seconds,
             "execution_seconds": execution_seconds,
             "median_execution_seconds": median_execution,
+            "min_execution_seconds": min(execution_seconds),
+            "max_execution_seconds": max(execution_seconds),
+            "std_execution_seconds": pstdev(execution_seconds),
+            "aggregation": "maximum_across_processes",
             "grid_point_updates_per_second": (
                 args.nx * args.ny * n_steps / median_execution
             ),
